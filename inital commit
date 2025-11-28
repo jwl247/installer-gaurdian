@@ -1,0 +1,1299 @@
+import os
+import json
+import hashlib
+import re
+from datetime import datetime, time
+from pathlib import Path
+import getpass
+import socket
+
+class InstallerGuardian:
+    """The cute tag-along who knows everyone in every department"""
+    def __init__(self, registry_file='installer_registry.json'):
+        self.registry_file = registry_file
+        self.registry = self.load_registry()
+        self.conflicts = []
+        self.suggestions = []
+        print("ðŸ'‹ Installer Guardian initialized - I know everyone here!")
+        
+    def load_registry(self):
+        """Load centralized config registry"""
+        if Path(self.registry_file).exists():
+            with open(self.registry_file, 'r') as f:
+                return json.load(f)
+        return {
+            'configs': {},
+            'ports': {},
+            'paths': {},
+            'services': {},
+            'conflicts_log': [],
+            'friendships': {}  # Track which services work together
+        }
+    
+    def save_registry(self):
+        with open(self.registry_file, 'w') as f:
+            json.dump(self.registry, f, indent=2)
+    
+    def make_friends(self, service1, service2):
+        """Register that two services are friends (work together)"""
+        if service1 not in self.registry['friendships']:
+            self.registry['friendships'][service1] = []
+        if service2 not in self.registry['friendships']:
+            self.registry['friendships'][service2] = []
+        
+        if service2 not in self.registry['friendships'][service1]:
+            self.registry['friendships'][service1].append(service2)
+        if service1 not in self.registry['friendships'][service2]:
+            self.registry['friendships'][service2].append(service1)
+        
+        self.save_registry()
+        print(f"ðŸ'• {service1} and {service2} are now friends!")
+    
+    def are_friends(self, service1, service2):
+        """Check if two services are registered friends"""
+        friends1 = self.registry['friendships'].get(service1, [])
+        return service2 in friends1
+    
+    def scan_config_file(self, filepath):
+        """Scan config file and extract key settings"""
+        config_data = {
+            'filepath': str(filepath),
+            'filename': Path(filepath).name,
+            'type': self.detect_config_type(filepath),
+            'ports': [],
+            'paths': [],
+            'settings': {},
+            'scanned': datetime.now().isoformat()
+        }
+        
+        try:
+            with open(filepath, 'r') as f:
+                content = f.read()
+                
+            # Extract ports
+            port_patterns = [
+                r'[Pp]ort[:\s=]+(\d+)',
+                r'Listen\s+(\d+)',
+                r':(\d{2,5})',
+                r'PORT[:\s=]+(\d+)'
+            ]
+            for pattern in port_patterns:
+                matches = re.findall(pattern, content)
+                config_data['ports'].extend([int(p) for p in matches if p.isdigit()])
+            
+            # Extract paths
+            path_patterns = [
+                r'[Pp]ath[:\s=]+"?([/\\][\w/\\.-]+)"?',
+                r'DocumentRoot\s+"?([/\\][\w/\\.-]+)"?',
+                r'root\s+"?([/\\][\w/\\.-]+)"?'
+            ]
+            for pattern in path_patterns:
+                matches = re.findall(pattern, content)
+                config_data['paths'].extend(matches)
+            
+            # Remove duplicates
+            config_data['ports'] = list(set(config_data['ports']))
+            config_data['paths'] = list(set(config_data['paths']))
+            
+        except Exception as e:
+            config_data['error'] = str(e)
+        
+        return config_data
+    
+    def detect_config_type(self, filepath):
+        """Detect what type of config file this is"""
+        name = Path(filepath).name.lower()
+        path_str = str(filepath).lower()
+        
+        if 'apache' in name or 'httpd' in name:
+            return 'Apache'
+        elif 'nginx' in name:
+            return 'Nginx'
+        elif 'php' in name:
+            return 'PHP'
+        elif 'mysql' in name or 'mariadb' in name:
+            return 'MySQL/MariaDB'
+        elif 'docker' in name:
+            return 'Docker'
+        elif '.env' in name:
+            return 'Environment'
+        elif 'wamp' in path_str:
+            return 'WAMP'
+        elif 'lamp' in path_str:
+            return 'LAMP'
+        elif 'helix' in path_str:
+            return 'Helix'
+        elif 'lifefirst' in path_str:
+            return 'LifeFirst'
+        elif 'ollama' in path_str:
+            return 'Ollama'
+        elif 'vosk' in path_str:
+            return 'Vosk'
+        else:
+            return 'Generic'
+    
+    def register_config(self, filepath, service_name=None):
+        """Register config file in centralized registry"""
+        config_data = self.scan_config_file(filepath)
+        config_hash = hashlib.sha256(str(filepath).encode()).hexdigest()
+        
+        # Store in registry
+        self.registry['configs'][config_hash] = config_data
+        
+        # Register ports
+        for port in config_data['ports']:
+            if port not in self.registry['ports']:
+                self.registry['ports'][port] = []
+            self.registry['ports'][port].append({
+                'config': config_hash,
+                'service': service_name or config_data['type'],
+                'file': str(filepath)
+            })
+        
+        # Register paths
+        for path in config_data['paths']:
+            if path not in self.registry['paths']:
+                self.registry['paths'][path] = []
+            self.registry['paths'][path].append({
+                'config': config_hash,
+                'service': service_name or config_data['type'],
+                'file': str(filepath)
+            })
+        
+        # Check for conflicts
+        conflicts = self.check_conflicts(config_hash)
+        
+        self.save_registry()
+        
+        print(f"âœ" Registered: {config_data['filename']} ({config_data['type']})")
+        print(f"  Ports: {config_data['ports']}")
+        print(f"  Paths: {len(config_data['paths'])}")
+        
+        if conflicts:
+            print(f"  âš ï¸  Conflicts detected: {len(conflicts)}")
+            for conflict in conflicts:
+                # Check if conflicting services are friends
+                services = conflict['services']
+                if len(services) == 2 and self.are_friends(services[0], services[1]):
+                    print(f"  ðŸ'• But they're friends, so it's probably OK!")
+        
+        return config_hash, conflicts
+    
+    def check_conflicts(self, config_hash):
+        """Check for conflicts with existing configs"""
+        conflicts = []
+        config = self.registry['configs'][config_hash]
+        
+        # Port conflicts
+        for port in config['ports']:
+            existing = self.registry['ports'].get(port, [])
+            if len(existing) > 1:
+                conflicts.append({
+                    'type': 'port',
+                    'value': port,
+                    'services': [e['service'] for e in existing],
+                    'files': [e['file'] for e in existing]
+                })
+        
+        # Path conflicts
+        for path in config['paths']:
+            existing = self.registry['paths'].get(path, [])
+            if len(existing) > 1:
+                conflicts.append({
+                    'type': 'path',
+                    'value': path,
+                    'services': [e['service'] for e in existing],
+                    'files': [e['file'] for e in existing]
+                })
+        
+        return conflicts
+    
+    def suggest_alternatives(self, conflict):
+        """Suggest alternative ports/paths for conflicts"""
+        suggestions = []
+        
+        if conflict['type'] == 'port':
+            port = conflict['value']
+            # Suggest nearby available ports
+            for offset in [1, 10, 100, 1000]:
+                alt_port = port + offset
+                if alt_port not in self.registry['ports'] and alt_port < 65535:
+                    suggestions.append({
+                        'type': 'port',
+                        'original': port,
+                        'alternative': alt_port,
+                        'reason': f'Port {port} + {offset}'
+                    })
+                    if len(suggestions) >= 3:
+                        break
+        
+        elif conflict['type'] == 'path':
+            path = conflict['value']
+            base = Path(path)
+            # Suggest numbered alternatives
+            for i in range(1, 4):
+                alt_path = f"{base.parent}/{base.stem}_{i}{base.suffix}"
+                if alt_path not in self.registry['paths']:
+                    suggestions.append({
+                        'type': 'path',
+                        'original': path,
+                        'alternative': alt_path,
+                        'reason': f'Numbered variant {i}'
+                    })
+        
+        return suggestions
+    
+    def resolve_conflicts(self):
+        """Present all conflicts and suggest alternatives"""
+        all_conflicts = []
+        
+        # Find all conflicts
+        for port, users in self.registry['ports'].items():
+            if len(users) > 1:
+                # Check if they're friends first
+                services = [u['service'] for u in users]
+                are_friends = len(services) == 2 and self.are_friends(services[0], services[1])
+                
+                all_conflicts.append({
+                    'type': 'port',
+                    'value': port,
+                    'services': services,
+                    'files': [u['file'] for u in users],
+                    'friends': are_friends
+                })
+        
+        for path, users in self.registry['paths'].items():
+            if len(users) > 1:
+                services = [u['service'] for u in users]
+                are_friends = len(services) == 2 and self.are_friends(services[0], services[1])
+                
+                all_conflicts.append({
+                    'type': 'path',
+                    'value': path,
+                    'services': services,
+                    'files': [u['file'] for u in users],
+                    'friends': are_friends
+                })
+        
+        if not all_conflicts:
+            print("âœ" No conflicts detected! Everyone's getting along!")
+            return []
+        
+        print(f"\n{'='*70}")
+        print(f"ðŸ'• INSTALLER GUARDIAN - Checking who's stepping on toes")
+        print(f"{'='*70}\n")
+        
+        resolutions = []
+        for i, conflict in enumerate(all_conflicts, 1):
+            if conflict.get('friends', False):
+                print(f"\nConflict #{i}: {conflict['type'].upper()} (But they're friends!)")
+            else:
+                print(f"\nConflict #{i}: {conflict['type'].upper()}")
+            
+            print(f"  Value: {conflict['value']}")
+            print(f"  Services: {', '.join(conflict['services'])}")
+            print(f"  Files affected:")
+            for f in conflict['files']:
+                print(f"    - {f}")
+            
+            if conflict.get('friends', False):
+                print(f"  ðŸ'• These services are registered as friends - probably intentional!")
+            
+            # Get suggestions
+            suggestions = self.suggest_alternatives(conflict)
+            if suggestions and not conflict.get('friends', False):
+                print(f"\n  ðŸ'¡ Alternative methods:")
+                for j, sug in enumerate(suggestions, 1):
+                    print(f"    [{j}] Use {sug['alternative']} ({sug['reason']})")
+                
+                resolutions.append({
+                    'conflict': conflict,
+                    'suggestions': suggestions
+                })
+        
+        return resolutions
+    
+    def auto_scan(self, directories=None):
+        """Auto-scan common config locations"""
+        if directories is None:
+            directories = [
+                '/etc/apache2',
+                '/etc/nginx',
+                '/etc/php',
+                '/etc/mysql',
+                '/var/www/html',
+                '/lvm',
+                'C:\\wamp64\\bin',
+                'C:\\xampp',
+                './config',
+                './'
+            ]
+        
+        configs_found = []
+        
+        for directory in directories:
+            if not Path(directory).exists():
+                continue
+            
+            print(f"ðŸ" Scanning: {directory}")
+            
+            for root, dirs, files in os.walk(directory):
+                # Skip hidden directories
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                
+                for file in files:
+                    if any(ext in file.lower() for ext in ['.conf', '.ini', '.cfg', '.env', 'config', '.py']):
+                        filepath = Path(root) / file
+                        try:
+                            config_hash, conflicts = self.register_config(filepath)
+                            configs_found.append(str(filepath))
+                        except Exception as e:
+                            pass  # Silently skip files we can't read
+        
+        print(f"\nâœ" Scanned {len(configs_found)} config files")
+        return configs_found
+    
+    def introduce_to_port_guardian(self, port_guardian):
+        """Introduce self to Port Guardian and sync registries"""
+        print(f"\nðŸ'‹ Hi Port Guardian! I'm Installer Guardian!")
+        print(f"   Let me help you track all these configs...")
+        
+        # Scan for configs
+        configs = self.auto_scan()
+        
+        # Register all found ports with Port Guardian
+        for port, users in self.registry['ports'].items():
+            for user in users:
+                service = user['service']
+                if service not in port_guardian.config.get('registered_services', {}):
+                    if 'registered_services' not in port_guardian.config:
+                        port_guardian.config['registered_services'] = {}
+                    
+                    port_guardian.config['registered_services'][service] = {
+                        'ports': [port],
+                        'config_file': user['file'],
+                        'registered_by': 'installer_guardian',
+                        'registered_at': datetime.now().isoformat()
+                    }
+        
+        port_guardian.save_config()
+        print(f"\nðŸ'• Synced {len(self.registry['ports'])} ports with Port Guardian!")
+
+
+class FileGuardian:
+    """Port Guardian - The main security enforcer (Ford BCM style)"""
+    def __init__(self, config_file='file_guardian.json', instance_id='guardian_1'):
+        self.config_file = config_file
+        self.instance_id = instance_id
+        self.shared_intel_file = 'guardian_shared_intel.json'
+        self.config = self.load_config()
+        self.access_log = []
+        self.violations = []
+        self.threat_score = {}
+        self.auto_block_list = []
+        self.approved_patterns = []
+        self.load_shared_intel()
+        self.system_alive = True
+        self.in_failsafe = False
+        
+        # Initialize Installer Guardian (the cute tag-along)
+        self.installer = InstallerGuardian()
+        print(f"\nðŸ›¡ï¸  Port Guardian [{self.instance_id}] initialized")
+        
+        # Let Installer Guardian introduce herself
+        self.installer.introduce_to_port_guardian(self)
+        
+    def load_config(self):
+        """Load or create security rules"""
+        if Path(self.config_file).exists():
+            with open(self.config_file, 'r') as f:
+                return json.load(f)
+        return {
+            'protected_paths': [],
+            'allowed_users': [getpass.getuser()],
+            'allowed_ips': ['127.0.0.1', socket.gethostbyname(socket.gethostname())],
+            'allowed_hours': {'start': '06:00', 'end': '23:00'},
+            'suspicious_patterns': ['.exe', '.bat', '.sh', '.dll'],
+            'max_access_per_minute': 10,
+            'alert_on_delete': True,
+            'alert_on_copy': True,
+            'lockdown_mode': False,
+            'auto_block_threshold': 3,
+            'threat_decay_minutes': 30,
+            'proactive_mode': True,
+            'mirror_attack': True,
+            'mirror_multiplier': 3,
+            'interactive_mode': True,
+            'auto_approve_known': True,
+            'peer_mode': True,
+            'trust_levels': {},
+            'bcm_mode': False,
+            'log_only_violations': False,
+            'mesh_network': True,
+            'consensus_required': 2,
+            'vote_on_threats': True,
+            'component_registry': {},
+            'require_component_auth': True,
+            'autonomous_mode': True,
+            'failsafe_lockdown': True,
+            'heartbeat_timeout': 30,
+            'last_system_heartbeat': None,
+            'registered_services': {}  # Services registered by Installer Guardian
+        }
+    
+    def save_config(self):
+        with open(self.config_file, 'w') as f:
+            json.dump(self.config, f, indent=2)
+    
+    def load_shared_intel(self):
+        """Load threat intel shared by other guardian instances"""
+        try:
+            if Path(self.shared_intel_file).exists():
+                with open(self.shared_intel_file, 'r') as f:
+                    shared = json.load(f)
+                    
+                # Merge global blocks (consensus-based)
+                for blocked in shared.get('global_blocks', []):
+                    if blocked not in self.auto_block_list:
+                        votes = shared.get('block_votes', {}).get(blocked, [])
+                        if len(votes) >= self.config.get('consensus_required', 2):
+                            self.auto_block_list.append(blocked)
+                            print(f"ðŸ"¡ [{self.instance_id}] Consensus reached: {blocked} blocked by {len(votes)} guardians")
+                
+                # Merge threat scores (average from all guardians)
+                for identifier, score_data in shared.get('global_threats', {}).items():
+                    if identifier not in self.threat_score:
+                        self.threat_score[identifier] = score_data
+                    else:
+                        all_scores = [score_data['score'], self.threat_score[identifier]['score']]
+                        avg_score = sum(all_scores) / len(all_scores)
+                        self.threat_score[identifier]['score'] = int(avg_score)
+        except:
+            pass
+    
+    def vote_to_block(self, identifier):
+        """Cast vote to block a user - requires consensus"""
+        try:
+            shared = {}
+            if Path(self.shared_intel_file).exists():
+                with open(self.shared_intel_file, 'r') as f:
+                    shared = json.load(f)
+            
+            if 'block_votes' not in shared:
+                shared['block_votes'] = {}
+            
+            if identifier not in shared['block_votes']:
+                shared['block_votes'][identifier] = []
+            
+            if self.instance_id not in shared['block_votes'][identifier]:
+                shared['block_votes'][identifier].append(self.instance_id)
+                print(f"ðŸ—³ï¸  [{self.instance_id}] Voted to block {identifier}")
+            
+            votes = len(shared['block_votes'][identifier])
+            required = self.config.get('consensus_required', 2)
+            
+            if votes >= required:
+                if 'global_blocks' not in shared:
+                    shared['global_blocks'] = []
+                if identifier not in shared['global_blocks']:
+                    shared['global_blocks'].append(identifier)
+                print(f"âœ… [{self.instance_id}] CONSENSUS: {identifier} blocked ({votes}/{required} guardians agree)")
+            
+            shared['last_update'] = datetime.now().isoformat()
+            with open(self.shared_intel_file, 'w') as f:
+                json.dump(shared, f, indent=2)
+            
+            return votes >= required
+        except:
+            return False
+    
+    def broadcast_threat(self, identifier, threat_data):
+        """Share threat intel with other guardians"""
+        try:
+            shared = {}
+            if Path(self.shared_intel_file).exists():
+                with open(self.shared_intel_file, 'r') as f:
+                    shared = json.load(f)
+            
+            if 'global_threats' not in shared:
+                shared['global_threats'] = {}
+            if 'global_blocks' not in shared:
+                shared['global_blocks'] = []
+            
+            shared['global_threats'][identifier] = threat_data
+            
+            if identifier in self.auto_block_list and identifier not in shared['global_blocks']:
+                shared['global_blocks'].append(identifier)
+            
+            shared['last_update'] = datetime.now().isoformat()
+            shared['updated_by'] = self.instance_id
+            
+            with open(self.shared_intel_file, 'w') as f:
+                json.dump(shared, f, indent=2)
+            
+            print(f"ðŸ"¡ [{self.instance_id}] Broadcasted threat: {identifier}")
+        except:
+            pass
+    
+    def get_file_hash(self, filepath):
+        """Get file hash for integrity checking"""
+        try:
+            with open(filepath, 'rb') as f:
+                return hashlib.sha256(f.read()).hexdigest()
+        except:
+            return None
+    
+    def check_what(self, filepath, action):
+        """WHAT: Check if file type and action are allowed"""
+        ext = Path(filepath).suffix.lower()
+        
+        if ext in self.config['suspicious_patterns']:
+            return False, f"Blocked suspicious file type: {ext}"
+        
+        if action == 'delete' and self.config['lockdown_mode']:
+            return False, "Delete blocked: lockdown mode active"
+        
+        return True, "File check passed"
+    
+    def check_when(self):
+        """WHEN: Check if access is during allowed hours"""
+        now = datetime.now().time()
+        start = datetime.strptime(self.config['allowed_hours']['start'], '%H:%M').time()
+        end = datetime.strptime(self.config['allowed_hours']['end'], '%H:%M').time()
+        
+        if start <= now <= end:
+            return True, "Access time allowed"
+        return False, f"Access denied: outside allowed hours ({start}-{end})"
+    
+    def check_where(self):
+        """WHERE: Check if access is from allowed location/IP"""
+        current_user = getpass.getuser()
+        current_ip = socket.gethostbyname(socket.gethostname())
+        identifier = f"{current_user}@{current_ip}"
+        
+        if identifier in self.auto_block_list:
+            return False, f"BLOCKED: Auto-banned after repeated violations"
+        
+        if self.config['peer_mode'] and current_user in self.config['trust_levels']:
+            trust = self.config['trust_levels'][current_user]
+            if trust < 5:
+                return False, f"Insufficient trust level: {trust}/10 (user: {current_user})"
+        
+        if current_user not in self.config['allowed_users']:
+            return False, f"Unauthorized user: {current_user}"
+        
+        if current_ip not in self.config['allowed_ips']:
+            return False, f"Unauthorized IP: {current_ip}"
+        
+        return True, "Location verified"
+    
+    def calculate_threat_score(self, identifier):
+        """Calculate real-time threat score"""
+        if identifier not in self.threat_score:
+            self.threat_score[identifier] = {'score': 0, 'last_violation': None}
+        
+        if self.threat_score[identifier]['last_violation']:
+            last_time = datetime.fromisoformat(self.threat_score[identifier]['last_violation'])
+            minutes_passed = (datetime.now() - last_time).seconds / 60
+            decay = int(minutes_passed / self.config['threat_decay_minutes'])
+            self.threat_score[identifier]['score'] = max(0, self.threat_score[identifier]['score'] - decay)
+        
+        return self.threat_score[identifier]['score']
+    
+    def increase_threat_score(self, identifier, severity=1):
+        """Increase threat score and vote to block if threshold exceeded"""
+        if identifier not in self.threat_score:
+            self.threat_score[identifier] = {'score': 0, 'last_violation': None}
+        
+        self.threat_score[identifier]['score'] += severity
+        self.threat_score[identifier]['last_violation'] = datetime.now().isoformat()
+        
+        score = self.threat_score[identifier]['score']
+        
+        self.broadcast_threat(identifier, self.threat_score[identifier])
+        
+        if score >= self.config['auto_block_threshold']:
+            if self.config.get('vote_on_threats', True):
+                consensus = self.vote_to_block(identifier)
+                if consensus:
+                    self.auto_block_list.append(identifier)
+                    print(f"ðŸš¨ [{self.instance_id}] BLOCKED BY CONSENSUS: {identifier}")
+                    return True
+                else:
+                    print(f"â³ [{self.instance_id}] Vote cast, awaiting consensus")
+                    return False
+            else:
+                self.auto_block_list.append(identifier)
+                print(f"ðŸš¨ [{self.instance_id}] AUTO-BLOCKED: {identifier} (threat score: {score})")
+                return True
+        
+        return False
+    
+    def mirror_attack_signal(self, identifier, attack_type):
+        """Mirror attacker's signal back at faster pace"""
+        if not self.config['mirror_attack']:
+            return
+        
+        multiplier = self.config['mirror_multiplier']
+        
+        print(f"\nâš"ï¸  COUNTER-ATTACK INITIATED")
+        print(f"ðŸŽ¯ Target: {identifier}")
+        print(f"ðŸ"¡ Mirroring signal at {multiplier}x speed")
+        
+        for i in range(multiplier * 10):
+            dummy_response = {
+                'timestamp': datetime.now().isoformat(),
+                'target': identifier,
+                'response': f"MIRROR_{i}",
+                'message': 'Access denied - system protected'
+            }
+            
+        print(f"ðŸ'¥ Sent {multiplier * 10} mirror responses")
+        print(f"ðŸ›¡ï¸  Attacker overwhelmed")
+    
+    def register_component(self, component_name, component_id, component_type, metadata=None):
+        """Register a component (Windows Registry style)"""
+        component_hash = hashlib.sha256(f"{component_name}:{component_id}".encode()).hexdigest()
+        
+        self.config['component_registry'][component_hash] = {
+            'name': component_name,
+            'id': component_id,
+            'type': component_type,
+            'registered': datetime.now().isoformat(),
+            'registered_by': self.instance_id,
+            'metadata': metadata or {},
+            'access_count': 0,
+            'last_access': None
+        }
+        self.save_config()
+        
+        print(f"ðŸ"§ [{self.instance_id}] Component registered:")
+        print(f"   Name: {component_name}")
+        print(f"   ID: {component_id}")
+        print(f"   Hash: {component_hash[:16]}...")
+        print(f"   Type: {component_type}")
+        return component_hash
+    
+    def verify_component(self, component_name, component_id):
+        """Verify component is registered"""
+        component_hash = hashlib.sha256(f"{component_name}:{component_id}".encode()).hexdigest()
+        
+        if component_hash in self.config['component_registry']:
+            self.config['component_registry'][component_hash]['access_count'] += 1
+            self.config['component_registry'][component_hash]['last_access'] = datetime.now().isoformat()
+            return True, "Component verified (fast lane)"
+        else:
+            return False, f"UNREGISTERED: {component_name}"
+    
+    def check_system_heartbeat(self):
+        """Check if main system is still alive"""
+        if not self.config.get('autonomous_mode', True):
+            return True
+        
+        last_heartbeat = self.config.get('last_system_heartbeat')
+        if not last_heartbeat:
+            return True
+        
+        timeout = self.config.get('heartbeat_timeout', 30)
+        last_time = datetime.fromisoformat(last_heartbeat)
+        seconds_since = (datetime.now() - last_time).seconds
+        
+        if seconds_since > timeout:
+            if not self.in_failsafe:
+                print(f"\nðŸš¨ðŸš¨ðŸš¨ SYSTEM FAILURE DETECTED ðŸš¨ðŸš¨ðŸš¨")
+                print(f"[{self.instance_id}] No heartbeat for {seconds_since} seconds")
+                print(f"ðŸ"' ACTIVATING FAILSAFE LOCKDOWN")
+                self.in_failsafe = True
+                self.config['failsafe_lockdown'] = True
+                self.save_config()
+            return False
+        
+        return True
+    
+    def system_heartbeat(self):
+        """Main system calls this to prove it's alive"""
+        self.config['last_system_heartbeat'] = datetime.now().isoformat()
+        self.save_config()
+        self.system_alive = True
+        if self.in_failsafe:
+            print(f"âœ" [{self.instance_id}] System restored - exiting failsafe")
+            self.in_failsafe = False
+    
+    def check_anomaly_behavior(self, filepath):
+        """Security guard checking why someone's out of line"""
+        recent_accesses = [log['file'] for log in self.access_log[-20:]]
+        
+        if len(recent_accesses) > 5:
+            common_pattern = max(set(recent_accesses), key=recent_accesses.count)
+            common_dir = str(Path(common_pattern).parent)
+            current_dir = str(Path(filepath).parent)
+            
+            if current_dir != common_dir and common_pattern != filepath:
+                return True, f"ðŸš¨ HEY! Everyone's in {common_dir}, why are YOU in {current_dir}?!"
+        
+        return False, None
+    
+    def ask_user_permission(self, context):
+        """Interactive prompt for suspicious activity"""
+        if not self.config['interactive_mode']:
+            return False
+        
+        print(f"\n{'='*60}")
+        print(f"âš ï¸  SUSPICIOUS ACTIVITY DETECTED")
+        print(f"{'='*60}")
+        print(f"File: {context.get('file', 'N/A')}")
+        print(f"Action: {context.get('action', 'N/A')}")
+        print(f"Process: {context.get('process', 'N/A')}")
+        print(f"User: {context.get('user', 'N/A')}")
+        print(f"Reason: {context.get('reason', 'N/A')}")
+        
+        pattern_key = f"{context.get('process')}:{context.get('action')}"
+        if pattern_key in self.approved_patterns:
+            print(f"âœ" Previously approved - allowing")
+            return True
+        
+        print(f"\nOptions:")
+        print(f"  [Y] Allow once")
+        print(f"  [A] Allow always (remember this pattern)")
+        print(f"  [N] Deny")
+        print(f"  [B] Deny and BLOCK user permanently")
+        
+        choice = input(f"\nYour decision: ").strip().upper()
+        
+        if choice == 'Y':
+            print(f"âœ" Allowed once")
+            return True
+        elif choice == 'A':
+            self.approved_patterns.append(pattern_key)
+            print(f"âœ" Approved and remembered")
+            return True
+        elif choice == 'B':
+            identifier = f"{context.get('user')}@{context.get('ip')}"
+            self.auto_block_list.append(identifier)
+            print(f"ðŸš« User blocked permanently")
+            return False
+        else:
+            print(f"âœ— Denied")
+            return False
+    
+    def detect_brute_force(self, identifier):
+        """Detect brute force penetration attempts"""
+        recent_viols = [v for v in self.violations 
+                       if v.get('user', '') in identifier or v.get('ip', '') in identifier]
+        
+        last_minute = [v for v in recent_viols 
+                      if (datetime.now() - datetime.fromisoformat(v['timestamp'])).seconds < 60]
+        
+        if len(last_minute) >= 5:
+            print(f"\nðŸš¨ BRUTE FORCE DETECTED from {identifier}")
+            print(f"   Attempts: {len(last_minute)} in 60 seconds")
+            return True
+        
+        return False
+    
+    def predict_attack_pattern(self):
+        """Predict if an attack is underway based on patterns"""
+        recent_logs = [log for log in self.access_log 
+                      if (datetime.now() - datetime.fromisoformat(log['timestamp'])).seconds < 300]
+        
+        if len(recent_logs) < 5:
+            return False, None
+        
+        denied = [log for log in recent_logs if 'DENIED' in log['status']]
+        if len(denied) >= 3:
+            return True, "Multiple access denials detected - possible breach attempt"
+        
+        suspicious_files = [log for log in recent_logs 
+                           if any(ext in log['file'] for ext in self.config['suspicious_patterns'])]
+        if len(suspicious_files) >= 2:
+            return True, "Suspicious file access pattern detected"
+        
+        if len(recent_logs) > self.config['max_access_per_minute'] * 3:
+            return True, "Bot-like access pattern detected"
+        
+        return False, None
+    
+    def check_rate_limit(self, filepath):
+        """Detect suspicious rapid access patterns"""
+        recent = [log for log in self.access_log 
+                 if (datetime.now() - datetime.fromisoformat(log['timestamp'])).seconds < 60]
+        
+        if len(recent) > self.config['max_access_per_minute']:
+            return False, f"Rate limit exceeded: {len(recent)} accesses in 1 minute"
+        return True, "Rate limit ok"
+    
+    def authorize_access(self, filepath, action='read', component_id=None, component_name=None):
+        """Main authorization check - STANDALONE FAILSAFE if system dies"""
+        
+        # FAILSAFE CHECK
+        system_ok = self.check_system_heartbeat()
+        if not system_ok and self.config.get('failsafe_lockdown', True):
+            msg = "FAILSAFE LOCKDOWN ACTIVE - Main system offline, boat sealed"
+            print(f"ðŸš« [{self.instance_id}] {msg}")
+            self.log_violation(filepath, action, msg)
+            return False, msg
+        
+        current_user = getpass.getuser()
+        current_ip = socket.gethostbyname(socket.gethostname())
+        identifier = f"{current_user}@{current_ip}"
+        
+        bcm_mode = self.config.get('bcm_mode', False)
+        
+        # COMPONENT VERIFICATION
+        if self.config.get('require_component_auth', True) and component_id and component_name:
+            verified, verify_msg = self.verify_component(component_name, component_id)
+            if not verified:
+                print(f"ðŸš« {verify_msg}")
+                if not bcm_mode:
+                    self.log_violation(filepath, action, verify_msg)
+                    self.increase_threat_score(identifier, severity=5)
+                    return False, verify_msg
+                else:
+                    print(f"âš ï¸  BCM Alert: {verify_msg} (logged, not blocked)")
+        
+        self.load_shared_intel()
+        
+        # SECURITY GUARD CHECK
+        anomaly_detected, anomaly_msg = self.check_anomaly_behavior(filepath)
+        if anomaly_detected:
+            if bcm_mode:
+                print(f"âš ï¸  [{self.instance_id}] BCM Alert: {anomaly_msg} (logged, not blocked)")
+                self.log_violation(filepath, action, f"BCM: {anomaly_msg}")
+            else:
+                print(f"\nðŸš" SECURITY GUARD ALERT")
+                print(anomaly_msg)
+                context = {
+                    'file': filepath,
+                    'action': action,
+                    'process': 'unknown',
+                    'user': current_user,
+                    'ip': current_ip,
+                    'reason': anomaly_msg
+                }
+                if not self.ask_user_permission(context):
+                    self.log_violation(filepath, action, "Out of line anomaly")
+                    self.increase_threat_score(identifier, severity=2)
+                    return False, "Denied: anomalous access pattern"
+        
+        # PROACTIVE ATTACK DETECTION
+        if self.config['proactive_mode']:
+            attack_detected, attack_reason = self.predict_attack_pattern()
+            if attack_detected:
+                if bcm_mode:
+                    print(f"âš ï¸  [{self.instance_id}] BCM Alert: {attack_reason} (logged, not blocked)")
+                    self.log_violation(filepath, action, f"BCM: {attack_reason}")
+                else:
+                    print(f"âš ï¸  ATTACK DETECTED: {attack_reason}")
+                    print(f"ðŸ›¡ï¸  ACTIVATING DEFENSIVE MEASURES")
+                    self.increase_threat_score(identifier, severity=2)
+        
+        # Check threat score
+        current_threat = self.calculate_threat_score(identifier)
+        if current_threat >= self.config['auto_block_threshold']:
+            msg = f"Access denied: threat score {current_threat}"
+            if bcm_mode:
+                print(f"âš ï¸  [{self.instance_id}] BCM Alert: {msg} (logged, allowed in BCM mode)")
+                self.log_violation(filepath, action, f"BCM: {msg}")
+            else:
+                self.log_violation(filepath, action, msg)
+                return False, msg
+        
+        # Run all checks
+        violations = []
+        
+        what_ok, what_msg = self.check_what(filepath, action)
+        if not what_ok:
+            violations.append(what_msg)
+        
+        when_ok, when_msg = self.check_when()
+        if not when_ok:
+            violations.append(when_msg)
+        
+        where_ok, where_msg = self.check_where()
+        if not where_ok:
+            violations.append(where_msg)
+        
+        rate_ok, rate_msg = self.check_rate_limit(filepath)
+        if not rate_ok:
+            violations.append(rate_msg)
+        
+        if violations:
+            if bcm_mode:
+                for v in violations:
+                    print(f"âš ï¸  [{self.instance_id}] BCM Alert: {v} (logged, not blocked)")
+                    self.log_violation(filepath, action, f"BCM: {v}")
+                self.log_access(filepath, action, 'ALLOWED (BCM mode)')
+                return True, "BCM mode: logged violations but allowed"
+            else:
+                for v in violations:
+                    self.log_violation(filepath, action, v)
+                    self.increase_threat_score(identifier)
+                return False, violations[0]
+        
+        self.log_access(filepath, action, 'ALLOWED')
+        return True, "Access granted"
+    
+    def log_access(self, filepath, action, status):
+        """Log all access attempts"""
+        log_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'file': filepath,
+            'action': action,
+            'status': status,
+            'user': getpass.getuser(),
+            'ip': socket.gethostbyname(socket.gethostname())
+        }
+        self.access_log.append(log_entry)
+    
+    def log_violation(self, filepath, action, reason):
+        """Log security violations"""
+        violation = {
+            'timestamp': datetime.now().isoformat(),
+            'file': filepath,
+            'action': action,
+            'reason': reason,
+            'user': getpass.getuser(),
+            'ip': socket.gethostbyname(socket.gethostname())
+        }
+        self.violations.append(violation)
+        self.log_access(filepath, action, f'DENIED: {reason}')
+        print(f"ðŸš¨ VIOLATION: {reason}")
+    
+    def protect_file(self, filepath):
+        """Add file to protected list"""
+        abs_path = str(Path(filepath).absolute())
+        if abs_path not in self.config['protected_paths']:
+            self.config['protected_paths'].append(abs_path)
+            self.save_config()
+            print(f"âœ" Protected: {abs_path}")
+    
+    def secure_read(self, filepath, component_id=None, component_name=None):
+        """Secure file read with authorization"""
+        authorized, msg = self.authorize_access(filepath, 'read', component_id, component_name)
+        if not authorized:
+            raise PermissionError(f"Access denied: {msg}")
+        
+        with open(filepath, 'r') as f:
+            return f.read()
+    
+    def secure_write(self, filepath, content, component_id=None, component_name=None):
+        """Secure file write with authorization"""
+        authorized, msg = self.authorize_access(filepath, 'write', component_id, component_name)
+        if not authorized:
+            raise PermissionError(f"Access denied: {msg}")
+        
+        with open(filepath, 'w') as f:
+            f.write(content)
+    
+    def secure_delete(self, filepath, component_id=None, component_name=None):
+        """Secure file delete with authorization"""
+        authorized, msg = self.authorize_access(filepath, 'delete', component_id, component_name)
+        if not authorized:
+            raise PermissionError(f"Access denied: {msg}")
+        
+        os.remove(filepath)
+        print(f"âœ" Deleted: {filepath}")
+    
+    def get_violations(self, last_n=10):
+        """Get recent violations"""
+        return self.violations[-last_n:]
+    
+    def lockdown(self, enable=True):
+        """Enable/disable lockdown mode"""
+        self.config['lockdown_mode'] = enable
+        self.save_config()
+        status = "ENABLED" if enable else "DISABLED"
+        print(f"ðŸ"' Lockdown mode {status}")
+    
+    def query(self, question):
+        """Query security status"""
+        q = question.lower()
+        
+        if 'violation' in q or 'attack' in q:
+            return {
+                'status': 'success',
+                'total_violations': len(self.violations),
+                'recent': self.violations[-5:],
+                'message': f"Found {len(self.violations)} violations"
+            }
+        
+        if 'access' in q or 'log' in q:
+            return {
+                'status': 'success',
+                'total_accesses': len(self.access_log),
+                'recent': self.access_log[-10:],
+                'message': f"Total accesses: {len(self.access_log)}"
+            }
+        
+        if 'protected' in q:
+            return {
+                'status': 'success',
+                'protected_files': self.config['protected_paths'],
+                'count': len(self.config['protected_paths'])
+            }
+        
+        if 'installer' in q or 'config' in q:
+            return {
+                'status': 'success',
+                'configs': len(self.installer.registry['configs']),
+                'ports': len(self.installer.registry['ports']),
+                'paths': len(self.installer.registry['paths']),
+                'conflicts': len([c for c in self.installer.resolve_conflicts() if not c.get('friends', False)])
+            }
+        
+        return {'status': 'error', 'message': 'Query not recognized'}
+
+
+if __name__ == "__main__":
+    import sys
+    
+    # Allow instance ID as first arg
+    instance_id = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith('-') else 'guardian_1'
+    if instance_id.startswith('guardian'):
+        guardian = FileGuardian(instance_id=instance_id)
+        sys.argv = [sys.argv[0]] + sys.argv[2:]
+    else:
+        guardian = FileGuardian()
+    
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1]
+        
+        if cmd == 'protect':
+            filepath = sys.argv[2]
+            guardian.protect_file(filepath)
+        
+        elif cmd == 'lockdown':
+            guardian.lockdown(True)
+        
+        elif cmd == 'unlock':
+            guardian.lockdown(False)
+        
+        elif cmd == 'check':
+            filepath = sys.argv[2]
+            action = sys.argv[3] if len(sys.argv) > 3 else 'read'
+            ok, msg = guardian.authorize_access(filepath, action)
+            print(f"{'âœ"' if ok else 'âœ—'} {msg}")
+        
+        elif cmd == 'violations':
+            viols = guardian.get_violations()
+            print(json.dumps(viols, indent=2))
+        
+        elif cmd == 'query':
+            question = ' '.join(sys.argv[2:])
+            result = guardian.query(question)
+            print(json.dumps(result, indent=2))
+        
+        elif cmd == 'threats':
+            print("Current Threat Scores:")
+            for identifier, data in guardian.threat_score.items():
+                print(f"  {identifier}: {data['score']} points")
+            print(f"\nAuto-blocked: {len(guardian.auto_block_list)} users")
+            for blocked in guardian.auto_block_list:
+                print(f"  ðŸš« {blocked}")
+        
+        elif cmd == 'unblock':
+            identifier = sys.argv[2]
+            if identifier in guardian.auto_block_list:
+                guardian.auto_block_list.remove(identifier)
+                guardian.threat_score[identifier]['score'] = 0
+                print(f"âœ" Unblocked: {identifier}")
+            else:
+                print(f"Not blocked: {identifier}")
+        
+        elif cmd == 'config':
+            if len(sys.argv) == 2:
+                print(json.dumps(guardian.config, indent=2))
+            elif len(sys.argv) == 4:
+                key = sys.argv[2]
+                value = sys.argv[3]
+                
+                if value.lower() == 'true':
+                    value = True
+                elif value.lower() == 'false':
+                    value = False
+                elif value.isdigit():
+                    value = int(value)
+                
+                guardian.config[key] = value
+                guardian.save_config()
+                print(f"âœ" Updated: {key} = {value}")
+            else:
+                print("Usage: config [key value]")
+        
+        elif cmd == 'trust':
+            if len(sys.argv) == 4:
+                username = sys.argv[2]
+                level = int(sys.argv[3])
+                guardian.config['trust_levels'][username] = level
+                guardian.save_config()
+                print(f"âœ" Trust level for {username}: {level}/10")
+            else:
+                print("Current trust levels:")
+                for user, level in guardian.config['trust_levels'].items():
+                    print(f"  {user}: {level}/10")
+        
+        elif cmd == 'bcm':
+            mode = sys.argv[2].lower() if len(sys.argv) > 2 else 'status'
+            if mode == 'on':
+                guardian.config['bcm_mode'] = True
+                guardian.save_config()
+                print("ðŸš— BCM Mode ENABLED - monitoring only, not blocking")
+            elif mode == 'off':
+                guardian.config['bcm_mode'] = False
+                guardian.save_config()
+                print("ðŸ›¡ï¸  BCM Mode DISABLED - full security enforcement")
+            else:
+                status = "ON" if guardian.config.get('bcm_mode', False) else "OFF"
+                print(f"BCM Mode: {status}")
+        
+        elif cmd == 'consensus':
+            if len(sys.argv) == 3:
+                guardian.config['consensus_required'] = int(sys.argv[2])
+                guardian.save_config()
+                print(f"âœ" Consensus requirement: {sys.argv[2]} guardians")
+            else:
+                print(f"Consensus required: {guardian.config.get('consensus_required', 2)} guardians")
+                if Path(guardian.shared_intel_file).exists():
+                    with open(guardian.shared_intel_file, 'r') as f:
+                        shared = json.load(f)
+                        votes = shared.get('block_votes', {})
+                        if votes:
+                            print("\nPending votes:")
+                            for user, voters in votes.items():
+                                print(f"  {user}: {len(voters)} votes {voters}")
+        
+        elif cmd == 'register':
+            if len(sys.argv) >= 5:
+                comp_name = sys.argv[2]
+                comp_id = sys.argv[3]
+                comp_type = sys.argv[4]
+                metadata = ' '.join(sys.argv[5:]) if len(sys.argv) > 5 else None
+                guardian.register_component(comp_name, comp_id, comp_type, metadata)
+            else:
+                print("Usage: register <name> <id> <type> [metadata]")
+                print("Example: register web_module mod_12345 http_handler 'Stripe integration'")
+        
+        elif cmd == 'unregister':
+            if len(sys.argv) == 4:
+                comp_name = sys.argv[2]
+                comp_id = sys.argv[3]
+                component_hash = hashlib.sha256(f"{comp_name}:{comp_id}".encode()).hexdigest()
+                if component_hash in guardian.config['component_registry']:
+                    comp_data = guardian.config['component_registry'][component_hash]
+                    del guardian.config['component_registry'][component_hash]
+                    guardian.save_config()
+                    print(f"ðŸ—'ï¸  Unregistered: {comp_data['name']} (used {comp_data['access_count']} times)")
+                else:
+                    print(f"Component not found: {comp_name}:{comp_id}")
+            else:
+                print("Usage: unregister <name> <id>")
+        
+        elif cmd == 'components':
+            print("Registered Components:")
+            for comp_hash, comp_data in guardian.config['component_registry'].items():
+                print(f"\n  {comp_data['name']}")
+                print(f"    ID: {comp_data['id']}")
+                print(f"    Type: {comp_data['type']}")
+                print(f"    Hash: {comp_hash[:16]}...")
+                print(f"    Registered: {comp_data['registered']}")
+                print(f"    Access count: {comp_data['access_count']}")
+        
+        elif cmd == 'heartbeat':
+            guardian.system_heartbeat()
+            print(f"ðŸ'" [{guardian.instance_id}] Heartbeat sent - system alive")
+        
+        elif cmd == 'status':
+            print(f"\nðŸ›¡ï¸  Port Guardian [{guardian.instance_id}] Status:")
+            print(f"  System alive: {guardian.system_alive}")
+            print(f"  Failsafe mode: {guardian.in_failsafe}")
+            print(f"  BCM mode: {guardian.config.get('bcm_mode', False)}")
+            print(f"  Lockdown: {guardian.config['lockdown_mode']}")
+            print(f"  Threats tracked: {len(guardian.threat_score)}")
+            print(f"  Auto-blocked: {len(guardian.auto_block_list)}")
+            print(f"  Total violations: {len(guardian.violations)}")
+            print(f"  Total accesses: {len(guardian.access_log)}")
+            print(f"\nðŸ'‹ Installer Guardian Status:")
+            print(f"  Configs tracked: {len(guardian.installer.registry['configs'])}")
+            print(f"  Ports registered: {len(guardian.installer.registry['ports'])}")
+            print(f"  Paths registered: {len(guardian.installer.registry['paths'])}")
+            print(f"  Services: {len(guardian.installer.registry['services'])}")
+            conflicts = guardian.installer.resolve_conflicts()
+            real_conflicts = [c for c in conflicts if not c['conflict'].get('friends', False)]
+            print(f"  Conflicts: {len(real_conflicts)}")
+        
+        elif cmd == 'installer':
+            sub_cmd = sys.argv[2] if len(sys.argv) > 2 else 'help'
+            
+            if sub_cmd == 'scan':
+                if len(sys.argv) > 3:
+                    path = sys.argv[3]
+                    guardian.installer.register_config(path)
+                else:
+                    guardian.installer.auto_scan()
+            
+            elif sub_cmd == 'conflicts':
+                guardian.installer.resolve_conflicts()
+            
+            elif sub_cmd == 'ports':
+                print("ðŸ"Œ Registered Ports:")
+                for port, users in sorted(guardian.installer.registry['ports'].items()):
+                    print(f"\n  Port {port}:")
+                    for user in users:
+                        print(f"    - {user['service']} ({Path(user['file']).name})")
+            
+            elif sub_cmd == 'friends':
+                if len(sys.argv) == 5:
+                    service1 = sys.argv[3]
+                    service2 = sys.argv[4]
+                    guardian.installer.make_friends(service1, service2)
+                else:
+                    print("ðŸ'• Service Friendships:")
+                    for service, friends in guardian.installer.registry['friendships'].items():
+                        print(f"  {service}: {', '.join(friends)}")
+            
+            elif sub_cmd == 'registry':
+                print(json.dumps(guardian.installer.registry, indent=2))
+            
+            else:
+                print("Installer Guardian Commands:")
+                print("  installer scan [path]    - Scan configs")
+                print("  installer conflicts      - Show conflicts")
+                print("  installer ports          - List ports")
+                print("  installer friends [s1 s2]- Make services friends")
+                print("  installer registry       - Show full registry")
+        
+        else:
+            print("ðŸ›¡ï¸  Port Guardian + Installer Guardian - Integrated Security")
+            print("\nMain Commands:")
+            print("  protect <file>           - Protect a file")
+            print("  lockdown                 - Enable lockdown mode")
+            print("  unlock                   - Disable lockdown")
+            print("  check <file> [action]    - Check if access allowed")
+            print("  violations               - Show violations")
+            print("  threats                  - Show threat scores")
+            print("  unblock <user@ip>        - Unblock a user")
+            print("  trust [user level]       - Set trust level (0-10)")
+            print("  bcm [on|off]             - Body Control Module mode")
+            print("  consensus [n]            - Set consensus requirement")
+            print("  register <n> <id> <t>    - Register component")
+            print("  unregister <n> <id>      - Unregister component")
+            print("  components               - List registered components")
+            print("  heartbeat                - Send system heartbeat")
+            print("  status                   - Full system status")
+            print("  query <question>         - Query security status")
+            print("  config [key value]       - View or set config")
+            print("\nInstaller Guardian:")
+            print("  installer scan [path]    - Scan configs")
+            print("  installer conflicts      - Check conflicts")
+            print("  installer ports          - List all ports")
+            print("  installer friends [s1 s2]- Register service friendship")
+            print("\nExamples:")
+            print("  python integrated_guardian.py status")
+            print("  python integrated_guardian.py installer scan /etc")
+            print("  python integrated_guardian.py installer friends Helix LifeFirst")
+            print("  python integrated_guardian.py query 'show me conflicts'")
+    else:
+        print("ðŸ›¡ï¸  Port Guardian + Installer Guardian")
+        print("   Port Guardian: The enforcer (Ford BCM style)")
+        print("   Installer Guardian: The cute tag-along who knows everyone")
+        print("\nUse 'python integrated_guardian.py help' for commands")
